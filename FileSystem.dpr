@@ -4,7 +4,15 @@ uses
   Windows,
   Messages,
   SysUtils,
+  Generics.Collections,
   StrUtils;
+
+type
+  TFileData = record
+    findData : WIN32_FIND_DATA;
+    handle : HWND;
+  end;
+  TFileList = TList<TFileData>;
 
 var
   Msg        : TMSG;
@@ -24,10 +32,10 @@ var
 
   //MyData
   data: WIN32_FIND_DATA;
-  tHandle1 : HWND;
+  fileHandle : HWND;
   tHandle2 : HWND;
-  i : Integer;
   currentPath : string;
+  files : TFileList;
 
 procedure ReleaseResources;
 begin
@@ -39,13 +47,40 @@ begin
   PostQuitMessage(0);
 end;
 
-function WindowProc(hWnd,Msg:Longint; wParam : WPARAM; lParam: LPARAM):Longint; stdcall;
+
+function GetFileFromHandle(handle : HWND) : TFileData;
+var
+  tempFile : TFileData;
+begin
+  for tempFile in files do
+    begin
+      if(tempFile.handle = handle) then
+      begin
+        Result := tempFile;
+        exit;
+      end;
+    end;
+end;
+
+function WindowProc(hWnd, Msg:Longint; wParam : WPARAM; lParam: LPARAM):Longint; stdcall;
+var
+  fileData : TFileData;
+  isDirectory : Boolean;
 begin
   case Msg of
       WM_COMMAND: begin
-        MessageBox(hMainHandle,'You pressed the button Hello', 'Hello',MB_OK or MB_ICONINFORMATION);
-        DestroyWindow(hButton);
-        writeLn(lParam);
+
+        writeLn('hwnd: ', hWnd, ' wParam: ', wParam, ' lParam: ', lParam);
+
+        fileData := GetFileFromHandle(lParam);
+
+        writeln(fileData.findData.cFileName);
+
+        isDirectory := fileData.findData.dwFileAttributes = 16;
+
+        //MessageBox(hMainHandle,'You pressed the button Hello', 'Hello',MB_OK or MB_ICONINFORMATION);
+        //DestroyWindow(hButton);
+        //writeLn(lParam);
       end;
 
       WM_DESTROY: ReleaseResources();
@@ -53,56 +88,81 @@ begin
   Result:=DefWindowProc(hWnd,Msg,wParam,lParam);
 end;
 
+function DrawFile(iteratorX : Integer; iteratorY : Integer) : HWND;
+var
+  btnWidth : Integer;
+  btnHeight : Integer;
+  handle : HWND;
+
+begin
+  btnWidth := 150;
+  btnHeight := 60;
+
+  //Create the button with the file name
+  handle :=CreateWindow('Button', data.cFileName, WS_VISIBLE or WS_CHILD or BS_PUSHBUTTON or BS_TEXT, 10+(iteratorX*200), 130+(iteratorY*(btnHeight div 2)*3), btnWidth, btnHeight, hMainHandle, 0, hInstance, nil);
+  SendMessage(hButton,WM_SETFONT,hFontButton,0);
+
+  Result := handle; //Return the newly created handle (in this case, a button handle)
+end;
+
+
+procedure AddFileToList(data: WIN32_FIND_DATA; handle : HWND);
+var
+  fileData : TFileData;
+begin
+  fileData.findData := data;
+  fileData.handle := handle;
+
+  files.Add(fileData);
+end;
 
 procedure DrawDirectory();
   var
     iteratorX : Integer;
     iteratorY : Integer;
-    btnWidth : Integer;
-    btnHeight : Integer;
+    handle : HWND;
+    i : Integer;
+    tempFile : TFileData;
 begin
-
        iteratorX := 0;
        iteratorY := 0;
-       btnWidth := 150;
-       btnHeight := 60;
 
-       tHandle1 := FindFirstFile( PWideChar(currentPath), data); //Get the first file of the C: directory
-       //writeln(data.cFileName);
+       fileHandle := FindFirstFile(PWideChar(currentPath), data);
 
-       //Create the button from the first file name
-       hButton:=CreateWindow('Button',data.cFileName, WS_VISIBLE or WS_CHILD or BS_PUSHBUTTON or BS_TEXT, 10+(iteratorX*200), 130+(iteratorY*(btnHeight div 2)*3), btnWidth, btnHeight, hMainHandle, 0, hInstance, nil);
-       SendMessage(hButton,WM_SETFONT,hFontButton,0);
+       handle := DrawFile(iteratorX, iteratorY);
+       AddFileToList(data, handle);
 
        //Increment this variable that will be used to make space between all subsequent buttons that will be created
        iteratorX := iteratorX + 1;
 
-       while (FindNextFile(tHandle1, data)) do begin
+       while (FindNextFile(fileHandle, data)) do begin
 
-             //writeln(data.cFileName);
-             hButton := CreateWindow('Button', data.cFileName, WS_VISIBLE or WS_CHILD or BS_PUSHBUTTON or BS_TEXT, 10+(iteratorX*200), 130+(iteratorY*(btnHeight div 2)*3), btnWidth, btnHeight, hMainHandle, 0, hInstance, nil);
-             SendMessage(hButton,WM_SETFONT,hFontButton,0);
-             iteratorX := iteratorX + 1;
+        handle := DrawFile(iteratorX, iteratorY);
+        AddFileToList(data, handle);
 
-             writeln(IfThen(data.dwFileAttributes = 16, 'Is Dir', 'I have no idea'));
+        iteratorX := iteratorX + 1;
 
-             //If five buttons have been created in the row, its time to be in another row
-             if ((iteratorX mod 5 = 0)) then
-                begin
-                  iteratorY := iteratorY + 1;
-                  iteratorX := 0;
-                end;
+        //writeln(IfThen(data.dwFileAttributes = 16, 'Is Dir', 'I have no idea'));
+
+        if ((iteratorX mod 5 = 0)) then
+          begin
+            iteratorY := iteratorY + 1;
+            iteratorX := 0;
+          end;
+
        end;
+
 end;
 
 procedure DrawElements;
 var
   pathStr : string;
 begin
-  RegisterClass(LWndClass);
-  hMainHandle := CreateWindow(LWndClass.lpszClassName,'Window Title', WS_CAPTION or WS_MINIMIZEBOX or WS_SYSMENU or WS_VISIBLE,
+  //RegisterClass(tagWin LWndClass);
+  Windows.RegisterClass(lWndClass);
+  hMainHandle := CreateWindow(LWndClass.lpszClassName,'Window Title', WS_CAPTION or WS_MINIMIZEBOX or WS_SYSMENU or WS_VISIBLE or WS_VSCROLL,
       (GetSystemMetrics(SM_CXSCREEN) div 2)-600,
-      (GetSystemMetrics(SM_CYSCREEN) div 2)-350, 1200,900,0,0,hInstance,nil);
+      (GetSystemMetrics(SM_CYSCREEN) div 2)-350, 1200,650,0,0,hInstance,nil);
 
   fontName := 'Comic Sans MS';
 
@@ -122,6 +182,8 @@ end;
 begin
   //create the window
   LWndClass.hInstance := hInstance;
+
+  //initialize struct
   with LWndClass do
     begin
       lpszClassName := 'MyWinApiWnd';
@@ -133,6 +195,7 @@ begin
     end;
 
   currentPath := 'C:\\*';
+  files := TList<TFileData>.Create;
 
   DrawElements();
 
