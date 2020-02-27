@@ -546,7 +546,7 @@ begin
   fileData := GetFileFromHandle(selectedFileOrDir);
 
   //Construct the file's absolute path
-  filePath := currentPath + string(fileData.findData.cFileName);
+  filePath := currentPath + string(fileData.findData.cFileName) + string('\0\0');
 
   //Initialize the struct for the SHFIleOperation function parameter
   with Info do
@@ -850,12 +850,12 @@ begin
   fontName := 'Comic Sans MS';
 
   //Create the fonts to use
-  hFontText   := CreateFont(-20,0,0,0,0,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,VARIABLE_PITCH or FF_SWISS, fontName);
+  hFontText := CreateFont(-20,0,0,0,0,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,VARIABLE_PITCH or FF_SWISS, fontName);
   hFontButton := CreateFont(-14,0,0,0,0,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,VARIABLE_PITCH or FF_SWISS, fontName);
-  hFontFiles  := CreateFont(18,0,0,0,0,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,VARIABLE_PITCH or FF_SWISS, fontName);
+  hFontFiles := CreateFont(18,0,0,0,0,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,VARIABLE_PITCH or FF_SWISS, fontName);
 
-  currentPath  := 'C:\\';
-  fileList     := TList<TFileData>.Create;
+  currentPath := 'C:\\';
+  fileList := TList<TFileData>.Create;
   pureFileList := TList<WIN32_FIND_DATA>.Create;
   FileExtensionIconMap := TDictionary<string,HBITMAP>.Create;
   InitFileExtensionMap();
@@ -877,7 +877,7 @@ begin
   SendMessage(hCreateDirBtn,WM_SETFONT,hFontButton,0);
 
   //Up Button
-  hUpBtn   := CreateWindow('Button', '^', WS_VISIBLE or WS_CHILD or BS_PUSHBUTTON or BS_TEXT, 1250, 300, 40, 40, hMainHandle, 0, hInstance, nil);
+  hUpBtn := CreateWindow('Button', '^', WS_VISIBLE or WS_CHILD or BS_PUSHBUTTON or BS_TEXT, 1250, 300, 40, 40, hMainHandle, 0, hInstance, nil);
 
   //Down Button
   hDownBtn := CreateWindow('Button', 'v', WS_VISIBLE or WS_CHILD or BS_PUSHBUTTON or BS_TEXT, 1250, 350, 40, 40, hMainHandle, 0, hInstance, nil);

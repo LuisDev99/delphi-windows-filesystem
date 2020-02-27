@@ -546,7 +546,7 @@ begin
   fileData := GetFileFromHandle(selectedFileOrDir);
 
   //Construct the file's absolute path
-  filePath := currentPath + string(fileData.findData.cFileName);
+  filePath := currentPath + string(fileData.findData.cFileName) + string('\0\0');
 
   //Initialize the struct for the SHFIleOperation function parameter
   with Info do
