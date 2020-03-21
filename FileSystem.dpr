@@ -1,3 +1,4 @@
+
 program FileSystem;
 
 
@@ -8,7 +9,13 @@ uses
   CommCtrl,
   Generics.Collections,
   StrUtils,
-  ShellApi;
+  ShellApi,
+  ShlObj,
+  ComObj,
+  ActiveX,
+  Types,
+  Math,
+  WinShell in 'WinShell.pas';
 
 type
   TFileData = record
@@ -20,21 +27,42 @@ type
     mainHandle : HWND;
     hLabel     : HWND;
   end;
-  TFileList = TList<TFileData>;
-  TFiles = TList<WIN32_FIND_DATA>;
+  TVNode = record
+    name         : string;
+    fullPath     : string;
+    ID           : Integer;   // Look up identifier
+    hItem        : HTREEITEM; // Where to insert
+    hParentItem  : HTREEITEM; // Keep Track of where its coming from
+  end;
+  TFileList     = TList<TFileData>;
+  TFiles        = TList<WIN32_FIND_DATA>;
+  THack         = TList<Integer>;
+  TVNodeList    = TList<TVNode>;
+
+const TV_ICON_SIZE = 20;
 
 const BackFileIconPath       = 'C:/Users/DELL/Documents/Siso2/backIcon_bmp.bmp';
 const FolderIconPath         = 'C:/Users/DELL/Documents/Siso2/Windows_folder_icon_bmp.bmp';
 const FileIconPath           = 'C:/Users/DELL/Documents/Siso2/file_icon2_bmp.bmp';
 const TextFileIconPath       = 'C:/Users/DELL/Documents/Siso2/txtIcon_bmp.bmp';
 const SearchIconPath         = 'C:/Users/DELL/Documents/Siso2/searchIcon2_bmp.bmp';
+const ShortcutIconPath       = 'C:/Users/DELL/Documents/Siso2/shortcut_icon_bmp.bmp';
+const SymLinkIconPath        = 'C:/Users/DELL/Documents/Siso2/symlink_icon_bmp.bmp';
 const CreateFileIconPath     = 'C:/Users/DELL/Documents/Siso2/createFileIcon_bmp.bmp';
 const CreateFolderIconPath   = 'C:/Users/DELL/Documents/Siso2/createFolderIcon_bmp.bmp';
 const ExecutableFileIconPath = 'C:/Users/DELL/Documents/Siso2/exeFileIcon_1_bmp.bmp';
 
-const DELETE_FILE_CONTEXT_MENU_BTN_ID = 21010101;
-const COPY_FILE_CONTEXT_MENU_BTN_ID = 41010101;
-const PASTE_FILE_CONTEXT_MENU_BTN_ID = 61010101;
+const DELETE_FILE_CONTEXT_MENU_BTN_ID      = 21010101;
+const COPY_FILE_CONTEXT_MENU_BTN_ID        = 41010101;
+const PASTE_FILE_CONTEXT_MENU_BTN_ID       = 61010101;
+const CUT_FILE_CONTEXT_MENU_BTN_ID         = 71010101;
+const CREATE_SYM_LINK_CONTEXT_MENU_BTN_ID  = 71010102;
+const CREATE_HARD_LINK_CONTEXT_MENU_BTN_ID = 71010103;
+const CREATE_SHORTCUT_CONTEXT_MENU_BTN_ID  = 71010104;
+
+{ Context Menu File operations }
+const OPERATION_CUTTING = 1;
+const OPERATION_COPYING = 2;
 
 const FILES_PER_ROW = 7;
 const MAX_AMOUNT_OF_FILES_ON_SCREEN = 35;
@@ -50,6 +78,7 @@ const INVALID_FILE = 'No file name will ever have this same exact string , soo y
 var
   Msg               : TMSG;
   LWndClass         : TWndClass;
+  LTWndClass        : TWndClass;
   hMainHandle       : HWND;
   hButton           : HWND;
   hTreeView         : HWND;
@@ -63,13 +92,17 @@ var
   currentPath       : string;
   fileList          : TFileList;
   pureFileList      : TFiles;
+  nodeList          : TVNodeList;
   hPathBtn          : HWND;
   hUpBtn            : HWND;
   hDownBtn          : HWND;
 
+  hack : THack;
+
   newFileName_str   : string;
   isSmallWndOpen    : Boolean;
   isFileBeingCreated: Boolean;
+  selectedFile_Operation : Integer;
 
   hPrev             : HTREEITEM;
   hPrevRootItem     : HTREEITEM;
@@ -78,40 +111,184 @@ var
   g_nOpen           : Integer;
   g_nClosed         : Integer;
   g_nDocument       : Integer;
+  g_nUniqueID       : Integer;
 
   nLevel            : Integer;
+  insertStructAddr  : Integer;
+
 
   rightClicked_selectedFileOrDir : HWND;
-  selectedFileOrDir_forCopying  : string;
+  selectedFileOrDirName_forCopying  : string;
+
 
   hCreateFileBtn, hCreateDirBtn, hSmallWnd    : HWND;
   hSmallWndEdit, hSmallOkBtn, hSmallCancelBtn : HWND;
 
-  hCreateFileIcon, hCreateFolderIcon, hBackIcon                         : HBITMAP;
-  hFolderIcon, hFileIcon, hTxtFileIcon, hExeFileIcon, hSearchPathIcon   : HBITMAP;
-
+  { Icon Handles }
+  hCreateFileIcon, hCreateFolderIcon, hBackIcon, hShortCutIcon, hSymLinkIcon   : HBITMAP;
+  hFolderIcon, hFileIcon, hTxtFileIcon, hExeFileIcon, hSearchPathIcon          : HBITMAP;
+  hSmallFolderIcon : HBITMAP;
 
   FileExtensionIconMap : TDictionary<string, HBITMAP>;
+  TreeViewNodesMap     : TDictionary<string, TVNode>;
 
 label exity;
+
+procedure ColorMessagePrinter(messageStr : string; typeOfMessage : string; color : Integer);
+var
+  ConOut: THandle;
+  BufInfo: TConsoleScreenBufferInfo;
+begin
+  ConOut := TTextRec(Output).Handle;
+    GetConsoleScreenBufferInfo(ConOut, BufInfo);
+    SetConsoleTextAttribute(TTextRec(Output).Handle, FOREGROUND_INTENSITY or color);
+
+    write(typeOfMessage);
+
+    SetConsoleTextAttribute(ConOut, BufInfo.wAttributes);
+
+    writeln(messageStr);
+end;
+
+procedure PrintInfoMsg(info : string);
+begin
+    ColorMessagePrinter(info, 'INFO: ', FOREGROUND_BLUE);
+end;
+
+procedure PrintLogMsg(info : string);
+begin
+    ColorMessagePrinter(info, 'LOG: ', FOREGROUND_GREEN);
+end;
+
+procedure PrintErrorMsg(info : string);
+begin
+    ColorMessagePrinter(info, 'ERROR: ', FOREGROUND_RED);
+end;
+
+procedure PrintDebugMsg(info : string);
+begin
+     ColorMessagePrinter(info, 'DEBUG >> ', FOREGROUND_GREEN or FOREGROUND_RED);
+end;
+
+function ExecuteProcess(const FileName, Params: string; Folder: string; WaitUntilTerminated, WaitUntilIdle, RunMinimized: boolean; var ErrorCode: integer): boolean;
+var
+  CmdLine: string;
+  WorkingDirP: PChar;
+  StartupInfo: TStartupInfo;
+  ProcessInfo: TProcessInformation;
+begin
+  Result := true;
+  CmdLine := '"' + FileName + '" ' + Params;
+  if Folder = '' then Folder := ExcludeTrailingPathDelimiter(ExtractFilePath(FileName));
+  ZeroMemory(@StartupInfo, SizeOf(StartupInfo));
+  StartupInfo.cb := SizeOf(StartupInfo);
+  if RunMinimized then
+    begin
+      StartupInfo.dwFlags := STARTF_USESHOWWINDOW;
+      StartupInfo.wShowWindow := SW_SHOWMINIMIZED;
+    end;
+  if Folder <> '' then WorkingDirP := PChar(Folder)
+  else WorkingDirP := nil;
+  if not CreateProcess(nil, PChar(CmdLine), nil, nil, false, 0, nil, WorkingDirP, StartupInfo, ProcessInfo) then
+    begin
+      Result := false;
+      ErrorCode := GetLastError;
+      exit;
+    end;
+  with ProcessInfo do
+    begin
+      CloseHandle(hThread);
+      if WaitUntilIdle then WaitForInputIdle(hProcess, INFINITE);
+      if WaitUntilTerminated then
+        repeat
+          //Application.ProcessMessages;
+        until MsgWaitForMultipleObjects(1, hProcess, false, INFINITE, QS_ALLINPUT) <> WAIT_OBJECT_0 + 1;
+      CloseHandle(hProcess);
+    end;
+end;
+
+function isPathDirectory(path : string) : Boolean;
+var
+  fileHandle  : HWND;
+  filePath    : string;
+begin
+  if(not path.EndsWith('\\')) then
+  begin
+    PrintErrorMsg('The path string should end with double back slash -> "\\"');
+  end;
+
+  filePath := path + '*';
+
+  fileHandle := FindFirstFile(PWideChar(filePath), data);
+
+  if(fileHandle = 4294967295) then
+  begin
+    Result := false;
+    exit;
+  end;
+
+  Result := true;
+
+end;
+
+function GetTVNodeFromItemID(nodeID : Integer): TVNode;
+var
+  node  : TVNode;
+begin
+
+  for node in nodeList do
+  begin
+    if(node.ID = nodeID) then
+    begin
+      Result := node;
+      exit;
+    end;
+  end;
+
+  Result := node;
+end;
+
+function GetTVNodeFromTreeViewSelectedItemHandle(tvHwnd: HWND) : TVNode;
+var
+  pSelectedItem         : TTVItem;
+  hTreeSelectedItem     : HTREEITEM;
+  secondBuffer          : array[0..1023] of WideChar;
+begin
+  hTreeSelectedItem    := TreeView_GetSelection(tvHwnd);
+  pSelectedItem.hItem  := hTreeSelectedItem;
+  pSelectedItem.mask   := TVIF_TEXT;
+  pSelectedItem.cchTextMax := 1023;
+  pSelectedItem.pszText := secondBuffer;
+
+  TreeView_GetItem(hTreeView, pSelectedItem);
+
+  //pSelectedItem.LParam holds the unique ID of the tree view node
+  Result := GetTVNodeFromItemID(pSelectedItem.lParam);
+end;
 
 procedure InitTreeViewImageListView();
 var
  himl   : HIMAGELIST;
  hbmp   : HBITMAP;
+ status : Integer;
 begin
- himl := ImageList_Create(60, 60, 0, 32, 0);
- writeln('Creating Image List Status: ', SysErrorMessage(GetLastError));
 
- g_nOpen     := ImageList_Add(himl, hFileIcon, HBITMAP(0));
- g_nClosed   := ImageList_Add(himl, hFolderIcon, HBITMAP(0));
- g_nDocument := ImageList_Add(himl, hSearchPathIcon, HBITMAP(0));
+ himl := ImageList_Create(TV_ICON_SIZE , TV_ICON_SIZE , 0, 3, 0);
 
- TreeView_SetImageList(hTreeView, himl, TVSIL_NORMAL);
+ PrintDebugMsg('Got here');
+
+ g_nOpen     := ImageList_Add(himl, hSmallFolderIcon, HBITMAP(0));
+ g_nClosed   := ImageList_Add(himl, hSmallFolderIcon, HBITMAP(0));
+ g_nDocument := ImageList_Add(himl, hSmallFolderIcon, HBITMAP(0));
+
+ if (ImageList_GetImageCount(himl) < 3) then
+        PrintLogMsg('Init of tree view image list failed miserably');
+
+ status      := TreeView_SetImageList(hTreeView, himl, TVSIL_NORMAL);
 
 end;
 
-function AddItemToTree( strName : string; nLevel : Integer ) : HTREEITEM;
+function AddItemToTreeView ( strName : string; uniqueID : Integer; hNodeParent : HTREEITEM ) : HTREEITEM;
 var
   tvi   : tagTVITEMA;
   tvins : tagTVINSERTSTRUCTA;
@@ -121,95 +298,88 @@ begin
   tvi.mask := TVIF_TEXT or TVIF_IMAGE or TVIF_SELECTEDIMAGE or TVIF_PARAM;
 
   //Set text of the item
-  tvi.pszText    := PansiChar(strName);
-  tvi.cchTextMax := SizeOf(tvi.pszText) div SizeOf(tvi.pszText[0]);
+  tvi.pszText    := PAnsiChar(PWideChar(strname));
+  tvi.cchTextMax := strName.Length;
 
   //Assume the item is not a parent item, so give it a document image
-  tvi.iImage := 1;
-  tvi.iSelectedImage := 1;
+  tvi.iImage := g_nDocument;
+  tvi.iSelectedImage := g_nDocument;
 
   //Save the heading level in the item's application-defined data area
-  tvi.lParam := LParam(nLevel);
+  tvi.lParam := LParam(uniqueID);
   tvins.item := tvi;
   tvins.hInsertAfter := hPrev;
 
-  //Set the parent item based on the specified level
-  if(nLevel = 1) then
-    begin
-      tvins.hParent := TVI_ROOT;
-    end
-   else if(nLevel = 2) then
-    begin
-      tvins.hParent := hPrevRootItem;
-    end
-   else
-    tvins.hParent := hPrevLev2Item;
+  //Choose where to insert the new item
+  tvins.hParent := hNodeParent;
 
+  //Add the item to the tree-view control
+  Result := HTREEITEM(SendMessage(hTreeView, TVM_INSERTITEM, 0, lParam(@tvins)));
 
-   //Add the item to the tree-view control
-   hPrev := HTREEITEM(SendMessage(hTreeView, TVM_INSERTITEM, 0, tvi.lParam));
+end;
 
-   if(hPrev = nil) then
-   begin
-    Result := nil;
-    exit;
-   end;
-
-   if(nLevel = 1) then
-     begin
-      hPrevRootItem := hPrev;
-     end
-   else if(nLevel = 2) then
-     begin
-       hPrevLev2Item := hPrev;
-     end;
-
-
-   if(nLevel > 1) then
-   begin
-    hti := TreeView_GetParent(hTreeView, hPrev);
-    tvi.mask := TVIF_IMAGE or TVIF_SELECTEDIMAGE;
-    tvi.hItem := hti;
-    tvi.iImage := g_nClosed;
-    tvi.iSelectedImage := g_nClosed;
-    TreeView_SetItemA(hTreeView, tvi);
-   end;
-
-   Result := hPrev;
+function AddNodeToTreeView (const node : TVNode) : HTREEITEM;
+begin
+   Result := AddItemToTreeView(node.name, node.ID, node.hParentItem);
 end;
 
 procedure InitTreeViewItems();
 var
   hti : HTREEITEM;
-  i: Integer;
+  i   : Integer;
 begin
+
+  //AddItemToTreeView('Hola' , 1, 444);
+
   for i := 0 to 5 do
   begin
-    hti := AddItemToTree('Hola' + IntToStr(i), i);
-
-    if(hti = nil) then
-    begin
-      writeln('Did not work, try harder');
-      exit;
-    end;
+    //AddItemToTreeView('Hola' + IntToStr(i), i + 2, i);
   end;
 
+  //AddItemToTreeView('Su gfa', 8, 211);
+
+end;
+
+procedure LoadDirectoryIntoTreeViewNodeList(path : string; hNodeParent : HTREEITEM);
+var
+  node        : TVNode;
+  fileHandle  : HWND;
+  fileData    : WIN32_FIND_DATA;
+
+begin
+  path        := path + '\\';
+
+  fileHandle := FindFirstFile(PWideChar(path + '*'), fileData);
+
+  repeat
+
+    if((string(fileData.cFileName) = '.') or (string(fileData.cFileName) = '..')) then
+      continue;
+
+    if(isPathDirectory(path + fileData.cFileName + '\\')) then
+    begin
+      node.name        := fileData.cFileName;
+      node.fullPath    := path + node.name;
+      node.ID          := g_nUniqueID;
+      node.hParentItem := hNodeParent;
+      node.hItem       := AddNodeToTreeView(node);
+
+      g_nUniqueID := g_nUniqueID + 1;
+
+      nodeList.Add(node);
+    end;
+
+  until (FindNextFile(fileHandle, fileData) = FALSE);
 
 end;
 
 procedure CreateTreeView();
-var
-  rcClient  : TRect;
 begin
   InitCommonControls();
 
-  GetClientRect(hMainHandle, rcClient);
-
-  hTreeView := CreateWindowEx(0, WC_TREEVIEW, 'Tree View', WS_VISIBLE or WS_CHILD or WS_BORDER or TVS_HASLINES, 10, TOP_BODY_Y, 180, 550, hMainHandle, 0, hInstance, 0);
+  hTreeView := CreateWindowEx(0, WC_TREEVIEW, LTWndClass.lpszClassName, WS_VISIBLE or WS_CHILD or TVS_HASLINES or TVS_HASBUTTONS, 10, TOP_BODY_Y, 180, 550, hMainHandle, 0, hInstance, 0);
 
   InitTreeViewImageListView();
-  InitTreeViewItems();
-
 end;
 
 procedure DestroyAllFiles();
@@ -254,26 +424,42 @@ end;
 
 function GetIconFromFileExtension(fileName : string) : HBITMAP;
 var
-  icon  : HBITMAP;
+  icon     : HBITMAP;
+  fullPath : string;
+  fileAttr : DWORD;
 begin
-  //Lazy checking to see if the fileName is a directory or not
-  if(not fileName.Contains('.')) then
+
+  fullPath := currentPath + fileName + '\\';
+
+  if(isPathDirectory(fullPath) and (not (fileName.Equals('..')))) then
     begin
        FileExtensionIconMap.TryGetValue('folder', icon);
     end
   else
     begin
-      if(fileName.Equals('..')) then
+
+      fullPath := fullPath.Remove(fullPath.LastIndexOf('\\'));
+      fileAttr := GetFileAttributes(PWideChar(fullPath));
+
+      if(fileAttr = FILE_ATTRIBUTE_REPARSE_POINT) then
+        begin
+          FileExtensionIconMap.TryGetValue('symlink', icon);
+        end
+      else if(fileName.Equals('..')) then
         begin
           FileExtensionIconMap.TryGetValue('back', icon);
         end
-      else if(fileName.Contains('.exe')) then
+      else if(fileName.EndsWith('.exe')) then
         begin
           FileExtensionIconMap.TryGetValue('exe', icon);
         end
-      else if(fileName.Contains('.txt')) then
+      else if(fileName.EndsWith('.txt')) then
         begin
           FileExtensionIconMap.TryGetValue('txt', icon);
+        end
+      else if(fileName.EndsWith('.lnk')) then
+        begin
+          FileExtensionIconMap.TryGetValue('shortcut', icon);
         end
       else
         begin
@@ -282,25 +468,6 @@ begin
     end;
 
   Result := icon;
-
-end;
-
-function isPathDirectory(path : string) : Boolean;
-var
-  fileHandle  : HWND;
-  filePath    : string;
-begin
-  filePath := path + '*';
-
-  fileHandle := FindFirstFile(PWideChar(filePath), data);
-
-  if(fileHandle = 4294967295) then
-  begin
-    Result := false;
-    exit;
-  end;
-
-  Result := true;
 
 end;
 
@@ -338,7 +505,7 @@ begin
 
   hFileIcon := GetIconFromFileExtension(data.cFileName);
 
-  //Create the button with a background image
+  //Create the button with a background image (the image being the icon depending on the file's type)
   handles.mainHandle := CreateWindowW('Button', data.cFileName, WS_VISIBLE or WS_CHILD or BS_BITMAP, xPos, yPos, btnWidth, btnHeight, hMainHandle, 0, hInstance, nil);
   SendMessageW(handles.mainHandle,BM_SETIMAGE,IMAGE_BITMAP, LPARAM(hFileIcon));
 
@@ -377,6 +544,8 @@ begin
     pureFileList.Add(fileData);
   end;
 
+  PrintLogMsg( 'Size of the directory lisT: ' + IntToStr( pureFileList.Count ) );
+
 end;
 
 procedure DrawDirectory();
@@ -404,8 +573,9 @@ begin
   if(startingIndex >= pureFileList.Count) then
     exit;
 
-  for i := startingIndex to MAX_AMOUNT_OF_FILES_ON_SCREEN do
+  for i := startingIndex to pureFileList.Count do
     begin
+
       if(i = pureFileList.Count) then
         exit;
 
@@ -532,7 +702,7 @@ begin
 
     if(bTest = false) then
     begin
-      writeln('Creation of dir failed: ', SysErrorMessage(GetLastError));
+      PrintErrorMsg('Creation of dir failed: ' + SysErrorMessage(GetLastError));
     end;
     exit;
   end;
@@ -546,6 +716,79 @@ begin
   else
     writeln(fileCompleteName, ' -> I was created');
 
+end;
+
+procedure CreateSymLink(path : string);
+var
+  dwFlags       : Integer;
+  alternateName : string;
+  status        : Boolean;
+begin
+  if(path = INVALID_FILE) then
+    exit;
+
+  alternateName := path + IntToStr(Random(20));
+
+  if(isPathDirectory(path + '\\')) then
+    begin
+      dwFlags := SYMBOLIC_LINK_FLAG_DIRECTORY or 2;
+    end
+  else
+    begin
+      dwFlags := 0 or 2;
+    end;
+
+  status := CreateSymbolicLink(PWideChar(alternateName), PWideChar(path), dwFlags);
+
+  PrintLogMsg('Status of creation of symbolic link: ' + BoolToStr(status) + ', GetLastError Message: ' + SysErrorMessage(GetLastError()));
+
+  selectedFileOrDirName_forCopying := INVALID_FILE;
+end;
+
+procedure CreateHardLinkss(path : string);
+var
+  alternateName : string;
+  status        : Boolean;
+begin
+  if(path = INVALID_FILE) then
+    exit;
+
+  //Hard links only for files
+  if(isPathDirectory(path + '\\')) then
+    exit;
+
+  alternateName := path.Remove( path.LastIndexOf('.') ) + IntToStr(Random(20)) + path.Substring( path.LastIndexOf('.'));
+
+  status := CreateHardLink(PWideChar(alternateName), PWideChar(path), nil);
+
+  PrintLogMsg('Status of creation of hard link: ' + BoolToStr(status) + ', GetLastError Message: ' + SysErrorMessage(GetLastError()));
+
+  selectedFileOrDirName_forCopying := INVALID_FILE;
+end;
+
+procedure CreateShortCut(path : string);
+var
+  IObject: IUnknown;
+  SLink: IShellLink;
+  PFile: IPersistFile;
+begin
+
+  if(path = INVALID_FILE) then
+    exit;
+
+  IObject:=CreateComObject(CLSID_ShellLink);
+  SLink:=IObject as IShellLink;
+  PFile:=IObject as IPersistFile;
+  with SLink do
+  begin
+    SetArguments(PChar('Hola'));
+    SetDescription(PChar('Shortcut by LuisDev99'));
+    SetPath(PChar(path));
+  end;
+  path := path + '.lnk';
+  PFile.Save(PWChar(WideString(path)), FALSE);
+
+  selectedFileOrDirName_forCopying := INVALID_FILE;
 end;
 
 function DoesFileHandleExist(hFile : HWND) : Boolean;
@@ -564,53 +807,95 @@ begin
    Result := false;
 end;
 
-procedure DeleteSelectedFileOrDirectory();
-var
-  filePath            : string;
-  fileData            : TFileData;
-  Info                : TSHFileOpStruct;
-  fileOperationStatus : Integer;
-  buffer              : array[0..1023] of char;
+procedure TraverseDirectory(path : string);
+ var
+  fileHandle  : HWND;
+  fileData    : WIN32_FIND_DATA;
+  currentFile : string;
 begin
 
-  //Get file's data from the global variable selectedFileOrDir
-  fileData := GetFileFromHandle(rightClicked_selectedFileOrDir);
+  fileHandle := FindFirstFile(PWideChar(path + '*'), fileData);
 
-  //Construct the file's absolute path
-  filePath := currentPath + string(fileData.findData.cFileName);
+  repeat
+    //Avoid a infinite loop by ignoring this file names
+    if((string(fileData.cFileName) = '.') or (string(fileData.cFileName) = '..')) then
+      continue;
 
-  writeln('In deleting, File path size is: ', filePath.Length);
+    currentFile := path + fileData.cFileName;
 
-  //Stack Overflow: Copying string content to char array delphi
-  StrLCopy(PChar(@buffer[0]), PChar(filePath), High(buffer));
+    if(isPathDirectory(currentFile + '\\')) then
+      begin
+        TraverseDirectory(currentFile + '\\');
+      end
+    else
+      begin
+         writeln('File: ', fileData.cFileName);
+      end;
+  until FindNextFile(fileHandle, fileData) = False;
 
-  //We created a buffer because the string that contains the path needs to be double null terminated
-  filePath := buffer;
+end;
 
-  //Initialize the struct for the SHFIleOperation function parameter
-  with Info do
-  begin
-    Wnd                   := hMainHandle;
-    wFunc                 := FO_DELETE;
-    pFrom                 := PWideChar(filePath);
-    pTo                   := PWideChar('');
-    fFlags                := FOF_ALLOWUNDO or FOF_WANTNUKEWARNING; //Old flags: FOF_NOCONFIRMATION or FOF_SILENT
-    fAnyOperationsAborted := false;
-    hNameMappings         := 0;
-    lpszProgressTitle     := PWideChar('');
-  end;
+procedure DeepDeletionOfFiles(root : string);
+var
+  fileHandle  : HWND;
+  fileData    : TSearchRec;
+  sourceFile  : string;
+begin
 
-  if(isPathDirectory(filePath + '\\')) then
-    begin
-      fileOperationStatus := SHFileOperation(Info);
-    end
-  else
-    begin
-      fileOperationStatus := SHFileOperation(Info);
-    end;
+  FindFirst(root + '\\*', faAnyFile, fileData);
+  sourceFile := root + '\\' + fileData.Name;
 
-    writeln('File being deleted: ', filePath);
-    writeln('File operation status code: ', fileOperationStatus);
+  repeat
+    //Avoid a infinite loop by ignoring this file names
+    if((string(fileData.Name) = '.') or (string(fileData.Name) = '..')) then
+      continue;
+
+    sourceFile := root + '\\' + fileData.Name;
+
+    if(fileData.Attr = FILE_ATTRIBUTE_DIRECTORY) then
+      begin
+        DeepDeletionOfFiles(sourceFile);
+      end
+    else
+      begin
+        DeleteFileW(PWideChar(sourceFile));
+      end;
+  until FindNext(fileData) <> 0;
+
+  PrintLogMsg('Closing -> ' + fileData.Name);
+  FindClose(fileData);
+  RemoveDirectory(PWideChar(root));
+end;
+
+procedure DeepCopyOfFiles(origin : string; destination : string);
+ var
+  fileHandle  : HWND;
+  fileData    : WIN32_FIND_DATA;
+  sourceFile  : string;
+  newFile     : string;
+begin
+  fileHandle := FindFirstFile(PWideChar(origin + '*'), fileData);
+
+  repeat
+    //Avoid a infinite loop by ignoring this file names
+    if((string(fileData.cFileName) = '.') or (string(fileData.cFileName) = '..')) then
+      continue;
+
+    sourceFile := origin + fileData.cFileName;
+    newFile    := destination + fileData.cFileName;
+
+    if(isPathDirectory(sourceFile + '\\')) then
+      begin
+        //First create the dir before doing the recursion
+        CreateDirectory(PWideChar(newFile), nil);
+
+        DeepCopyOfFiles(sourceFile + '\\', newFile + '\\');
+      end
+    else
+      begin
+        CopyFile(PWideChar(sourceFile), PWideChar(newFile), true);
+      end;
+  until FindNextFile(fileHandle, fileData) = False;
 end;
 
 procedure CopyPasteSelectedFileOrDirectory();
@@ -619,17 +904,55 @@ procedure CopyPasteSelectedFileOrDirectory();
   destination         : string;
   Info                : TSHFileOpStruct;
   fileOperationStatus : Integer;
-  buffer              : array[0..1023] of char;
-  buffer2             : array[0..1023] of char;
+  i: Integer;
 begin
-  if(selectedFileOrDir_forCopying = INVALID_FILE) then
+  if(selectedFileOrDirName_forCopying = INVALID_FILE) then
     exit;
 
-  origin      := selectedFileOrDir_forCopying;
-  writeln('In copying, File origin path size is: ', origin.Length);
+  origin := selectedFileOrDirName_forCopying;
 
-  destination := currentPath;
-  writeln('In deleting, File destination path size is: ', destination.Length);
+  //Extreme new way of renaming a copied file
+  destination := selectedFileOrDirName_forCopying.Remove( selectedFileOrDirName_forCopying.LastIndexOf('.') );
+  destination := destination + '_new' + IntToStr(Random(20));
+
+  if(isPathDirectory(origin + '\\')) then
+    begin
+      CreateDirectory(PWideChar(destination), nil);
+      DeepCopyOfFiles(origin + '\\', destination + '\\');
+    end
+  else
+    begin
+      destination := destination + selectedFileOrDirName_forCopying.Substring( selectedFileOrDirName_forCopying.LastIndexOf('.'));
+      CopyFile(PWideChar(origin), PWideChar(destination), true);
+    end;
+
+  exit;
+end;
+
+procedure CutPasteSelectedFileOrDirectory();
+var
+  origin              : string;
+  destination         : string;
+  Info                : TSHFileOpStruct;
+  fileOperationStatus : Boolean;
+  buffer              : array[0..1023] of char;
+  buffer2             : array[0..1023] of char;
+  i: Integer;
+begin
+  if(selectedFileOrDirName_forCopying = INVALID_FILE) then
+    exit;
+
+  //Initialize the buffers with null chars
+  for i := 0 to 1023 do
+    begin
+      buffer[i]  := char(0);
+      buffer2[i] := char(0);
+    end;
+
+  origin      := selectedFileOrDirName_forCopying;
+
+  destination := selectedFileOrDirName_forCopying.Substring(selectedFileOrDirName_forCopying.LastIndexOf('\\')); //Get just the file name by cutting the rest of the path
+  destination := currentPath + destination;
 
   //Stack Overflow: Copying string content to char array delphi
   StrLCopy(PChar(@buffer[0]), PChar(origin), High(buffer));
@@ -639,37 +962,78 @@ begin
   StrLCopy(PChar(@buffer2[0]), PChar(destination), High(buffer));
   destination := buffer2;
 
-  //Initialize the struct for the SHFIleOperation function parameter
-  with Info do
-  begin
-    Wnd                   := hMainHandle;
-    wFunc                 := FO_COPY;
-    pFrom                 := PWideChar(origin);
-    pTo                   := PWideChar(destination);
-    fFlags                := FOF_RENAMEONCOLLISION; //Old flags: FOF_NOCONFIRMATION or FOF_SILENT
-    fAnyOperationsAborted := false;
-    hNameMappings         := 0;
-    lpszProgressTitle     := PWideChar('');
-  end;
+  fileOperationStatus := MoveFileEx(PwideChar(origin), PWideChar(destination), MOVEFILE_WRITE_THROUGH);
 
-  fileOperationStatus := SHFileOperation(Info);
-  writeln('File operation status code: ', fileOperationStatus);
+  PrintInfoMsg('File operation status code: ' + BoolToStr(fileOperationStatus) + ' Error message: ' + SysErrorMessage(GetLastError()));
 
-  selectedFileOrDir_forCopying := INVALID_FILE;
+  if(fileOperationStatus = true) then
+    selectedFileOrDirName_forCopying := INVALID_FILE;
 
+end;
+
+procedure DeleteSelectedFileOrDirectory();
+var
+  filePath            : string;
+  fileData            : TFileData;
+begin
+
+  //Get file's data from the global variable selectedFileOrDir
+  fileData := GetFileFromHandle(rightClicked_selectedFileOrDir);
+
+  //Construct the file's absolute path
+  filePath := currentPath + string(fileData.findData.cFileName);
+
+  if(isPathDirectory(filePath + '\\')) then
+    begin
+      DeepDeletionOfFiles(filePath);
+    end
+  else
+    begin
+      DeleteFileW(PWideChar(filePath));
+    end;
+
+end;
+
+procedure CheckRepeated(lParam : Integer);
+var
+  element : Integer;
+  isFound : Boolean;
+begin
+
+  isFound := hack.Contains(lParam);
+
+  if(isFound) then
+    exit;
+
+  PrintLogMsg('Not repeated, is unique: ' +  IntToStr(lParam));
+  hack.Add(lParam);
 end;
 
 function WindowProc(hWnd, Msg:Longint; wParam : WPARAM; lParam: LPARAM):Longint; stdcall;
 var
-  fileData          : TFileData;
-  str               : string;
-  editText          : PWideChar;
-  buffer            : array[0..1023] of char;
-  pathFromTheFuture : string;
-  command           : string;
-  hPopUpMenu        : HMENU;
-  cursorPoint       : TPoint;
-  fileHandleExist   : Boolean;
+  fileData              : TFileData;
+  str                   : string;
+  editText              : PWideChar;
+  buffer                : array[0..1023] of char;
+  secondBuffer          : array[0..1023] of WideChar;
+  pathFromTheFuture     : string;
+  command               : string;
+  parameters            : string;
+  hPopUpMenu            : HMENU;
+  cursorPoint           : TPoint;
+  fileHandleExist       : Boolean;
+  FileName              : string;
+  WorkingFolder         : string;
+  Error                 : integer;
+  OK                    : boolean;
+  tvData                : PNMHDR;
+  ptvkd                 : PNMKey;
+  pSelectedItem         : TTVItem;
+  selectedTVNode        : TVNode;
+  hTreeSelectedItem     : HTREEITEM;
+  tvItemString          : string;
+  contextMenuPasteBtnFlags : Integer;
+  data                     : TShellLinkInfo;
 label endOfFunction, destroySmallWnd, repaintFiles;
 begin
 
@@ -679,24 +1043,78 @@ begin
         //Load all the icons
         hBackIcon         := HBITMAP(LoadImageW(0, PWideChar(BackFileIconPath),       IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
         hFolderIcon       := HBITMAP(LoadImageW(0, PWideChar(FolderIconPath),         IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        hSmallFolderIcon  := HBITMAP(LoadImageW(0, PWideChar(FolderIconPath),         IMAGE_BITMAP, TV_ICON_SIZE, TV_ICON_SIZE, LR_LOADFROMFILE));
         hFileIcon         := HBITMAP(LoadImageW(0, PWideChar(FileIconPath),           IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
         hTxtFileIcon      := HBITMAP(LoadImageW(0, PWideChar(TextFileIconPath),       IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
         hExeFileIcon      := HBITMAP(LoadImageW(0, PWideChar(ExecutableFileIconPath), IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
-        hSearchPathIcon   := HBITMAP(LoadImageW(0, PWideChar(SearchIconPath),         IMAGE_BITMAP, 100, 80, LR_LOADFROMFILE));
+        hSearchPathIcon   := HBITMAP(LoadImageW(0, PWideChar(SearchIconPath),         IMAGE_BITMAP,100, 80, LR_LOADFROMFILE));
+        hShortCutIcon     := HBITMAP(LoadImageW(0, PWideChar(ShortcutIconPath),       IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        hSymLinkIcon      := HBITMAP(LoadImageW(0, PWideChar(SymLinkIconPath),        IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
         hCreateFileIcon   := HBITMAP(LoadImageW(0, PWideChar(CreateFileIconPath),     IMAGE_BITMAP, 80, 78, LR_LOADFROMFILE));
         hCreateFolderIcon := HBITMAP(LoadImageW(0, PWideChar(CreateFolderIconPath),   IMAGE_BITMAP, 50, 50, LR_LOADFROMFILE));
       end;
 
-      WM_VSCROLL: begin
-        writeln('Scrolling');
+      WM_NOTIFY: begin
+
+        { LParam holds a pointer to the struct of the tree view item clicked,
+          so make a cast to have the struct's data }
+        tvData := PNMHDR(lParam);
+
+        if(tvData.code = TVN_KEYDOWN) then
+        begin
+          { LParam holds a pointer to the struct that has the key press information,
+            so make a cast to have the struct's data }
+          ptvkd    := PNMKEY(lParam);
+
+          { Check if the enter key was pressed }
+          if(ptvkd.nVKey = VK_RETURN) then
+          begin
+            { If the key enter was pressed on a tree view item, update the path
+              with the tree view item path and repaint to display that directory }
+
+            selectedTVNode := GetTVNodeFromTreeViewSelectedItemHandle(tvData.hwndFrom);
+            UpdatePath(selectedTVNode.fullPath + '\\');
+            goto repaintFiles;
+          end;
+
+        end;
+
+
+        if(tvData.code = NM_DBLCLK) then
+        begin
+          selectedTVNode := GetTVNodeFromTreeViewSelectedItemHandle(tvData.hwndFrom);
+
+          { Load the directory into the node that was clicked }
+          LoadDirectoryIntoTreeViewNodeList(selectedTVNode.fullPath, selectedTVNode.hItem);
+        end;
       end;
 
-      WM_MOUSEHWHEEL: begin
-        write('Mouse wheeling');
+      WM_MOUSEWHEEL: begin
+
+        //Read if the mouse wheel was going down
+        if(not (wParam = 4287102976)) then
+        begin
+          if(nLevel > 0) then
+            begin
+              nLevel := nLevel - 1;
+            end
+          else
+            begin
+              goto endOfFunction; //If equal to zero, then do not repaint in order to avoid flickering
+            end;
+
+          goto repaintFiles;
+        end else
+        begin
+          nLevel := nLevel + 1;
+
+          goto repaintFiles;
+        end;
+
       end;
 
       WM_KEYDOWN: begin
-        write('Keyboard key pressed: ', wParam, ' LParam: ', lParam);
+        PrintInfoMsg('Keyboard key pressed: ' + IntToStr(wParam) + ' LParam: ' + IntToStr( lParam));
       end;
 
       WM_CONTEXTMENU: begin
@@ -708,19 +1126,34 @@ begin
         GetCursorPos(cursorPoint);
         hPopupMenu := CreatePopupMenu();
 
-        //Check if the user right-clicked a file or folder, if not, exit
+        { Check if the user right-clicked a file or folder, if not, exit }
         if(not fileHandleExist) then
           begin
             rightClicked_selectedFileOrDir := 0;
-            InsertMenu(hPopupMenu, 0, MF_BYPOSITION or MF_STRING, PASTE_FILE_CONTEXT_MENU_BTN_ID, PWideChar('Paste'));
+            contextMenuPasteBtnFlags := MF_BYPOSITION or MF_STRING;
+
+            writeln(selectedFileOrDirName_forCopying);
+
+            { If no file is selected for an operation, then disable the paste button }
+            if(selectedFileOrDirName_forCopying = INVALID_FILE) then
+              contextMenuPasteBtnFlags := contextMenuPasteBtnFlags or MF_DISABLED;
+
+            InsertMenu(hPopupMenu, 0, contextMenuPasteBtnFlags, PASTE_FILE_CONTEXT_MENU_BTN_ID, PWideChar('Paste'));
           end
         else
           begin
-            //Save the handle that the user right-clicked on, in order to use that handle to find and delete the file
+            { Save the handle that the user right-clicked on, in order to use that handle to find and delete the file or for other file operations }
             rightClicked_selectedFileOrDir := wParam;
 
-            InsertMenu(hPopupMenu, 0, MF_BYPOSITION or MF_STRING, COPY_FILE_CONTEXT_MENU_BTN_ID, PWideChar('Copy'));
             InsertMenu(hPopupMenu, 0, MF_BYPOSITION or MF_STRING, DELETE_FILE_CONTEXT_MENU_BTN_ID, PWideChar('Delete'));
+            InsertMenu(hPopUpMenu, 0, MF_BYPOSITION or MF_SEPARATOR, 0, nil);
+            InsertMenu(hPopupMenu, 0, MF_BYPOSITION or MF_STRING, CREATE_SYM_LINK_CONTEXT_MENU_BTN_ID,  PWideChar('Create Sym Link'));
+            InsertMenu(hPopupMenu, 0, MF_BYPOSITION or MF_STRING, CREATE_HARD_LINK_CONTEXT_MENU_BTN_ID, PWideChar('Create Hard Link'));
+            InsertMenu(hPopupMenu, 0, MF_BYPOSITION or MF_STRING, CREATE_SHORTCUT_CONTEXT_MENU_BTN_ID,  PWideChar('Create Shortcut'));
+            InsertMenu(hPopUpMenu, 0, MF_BYPOSITION or MF_SEPARATOR, 0, nil);
+            InsertMenu(hPopupMenu, 0, MF_BYPOSITION or MF_STRING, CUT_FILE_CONTEXT_MENU_BTN_ID, PWideChar('Cut'));
+            InsertMenu(hPopupMenu, 0, MF_BYPOSITION or MF_STRING, COPY_FILE_CONTEXT_MENU_BTN_ID, PWideChar('Copy'));
+
           end;
 
         SetForegroundWindow(hWnd);
@@ -729,17 +1162,7 @@ begin
 
       WM_COMMAND: begin
 
-        //writeln('Something happen');
-        //writeln('WParam: ', wParam, ', lParam: ', lParam);
-
-        //If command is from an event fired from the search textbox, grab the textbox's text and update the path
-        if(lParam = hEdit) then
-        begin
-          editText := buffer;
-          GetWindowText(hEdit, editText, 1024);
-          UpdatePath(editText);
-          goto endOfFunction;
-        end;
+        { ------------------- "Scroll Bars" buttons events ------------------- }
 
         //Read the up button
         if(lParam = hUpBtn) then
@@ -750,7 +1173,7 @@ begin
             end
           else
             begin
-              goto endOfFunction; //If equal to zero, then do not repaint
+              goto endOfFunction; //If equal to zero, then do not repaint in order to avoid flickering
             end;
 
           goto repaintFiles;
@@ -764,24 +1187,80 @@ begin
           goto repaintFiles;
         end;
 
+        { ------------------- Context Menu buttons events -------------------- }
+
         //Read the context menu's paste button click event
         if(wParam = PASTE_FILE_CONTEXT_MENU_BTN_ID) then
         begin
-          writeln('Paste button was clicked, current path: ', currentPath);
-          CopyPasteSelectedFileOrDirectory();
+
+          PrintInfoMsg('Paste button was clicked, current path: ' + currentPath);
+
+          if(selectedFile_Operation = OPERATION_COPYING) then
+            begin
+              CopyPasteSelectedFileOrDirectory();
+            end
+          else
+            begin
+              CutPasteSelectedFileOrDirectory();
+            end;
+
           goto repaintFiles;
         end;
 
         if(wParam = COPY_FILE_CONTEXT_MENU_BTN_ID) then
         begin
-          writeln('Copy button was clicked');
+          PrintInfoMsg('Copy button was clicked');
 
-          selectedFileOrDir_forCopying := IfThen(rightClicked_selectedFileOrDir = 0, INVALID_FILE, (currentPath + GetFileFromHandle(rightClicked_selectedFileOrDir).findData.cFileName));
+          selectedFileOrDirName_forCopying := IfThen(rightClicked_selectedFileOrDir = 0, INVALID_FILE, (currentPath + GetFileFromHandle(rightClicked_selectedFileOrDir).findData.cFileName));
+          selectedFile_Operation := OPERATION_COPYING;
 
-          writeln('Selected file path: ', selectedFileOrDir_forCopying);
+          PrintLogMsg('Selected file path: ' + selectedFileOrDirName_forCopying);
 
           goto repaintFiles;
 
+        end;
+
+        if(wParam = CUT_FILE_CONTEXT_MENU_BTN_ID) then
+        begin
+          PrintInfoMsg('Cut button was clicked');
+
+          selectedFileOrDirName_forCopying := IfThen(rightClicked_selectedFileOrDir = 0, INVALID_FILE, (currentPath + GetFileFromHandle(rightClicked_selectedFileOrDir).findData.cFileName));
+          selectedFile_Operation := OPERATION_CUTTING;
+
+          PrintLogMsg('Selected file path: ' + selectedFileOrDirName_forCopying);
+
+          goto repaintFiles;
+
+        end;
+
+        if(wParam = CREATE_SYM_LINK_CONTEXT_MENU_BTN_ID) then
+        begin
+          PrintInfoMsg('Create symlink button was clicked');
+          selectedFileOrDirName_forCopying := IfThen(rightClicked_selectedFileOrDir = 0, INVALID_FILE, (currentPath + GetFileFromHandle(rightClicked_selectedFileOrDir).findData.cFileName));
+          CreateSymLink(selectedFileOrDirName_forCopying);
+          PrintLogMsg('Selected file path: ' + selectedFileOrDirName_forCopying);
+
+          goto repaintFiles;
+        end;
+
+        if(wParam = CREATE_HARD_LINK_CONTEXT_MENU_BTN_ID) then
+        begin
+          PrintInfoMsg('Create hard link button was clicked');
+          selectedFileOrDirName_forCopying := IfThen(rightClicked_selectedFileOrDir = 0, INVALID_FILE, (currentPath + GetFileFromHandle(rightClicked_selectedFileOrDir).findData.cFileName));
+          CreateHardLinkss(selectedFileOrDirName_forCopying);
+          PrintLogMsg('Selected file path: ' + selectedFileOrDirName_forCopying);
+
+          goto repaintFiles;
+        end;
+
+        if(wParam = CREATE_SHORTCUT_CONTEXT_MENU_BTN_ID) then
+        begin
+          PrintInfoMsg('Create shortcut button was clicked');
+          selectedFileOrDirName_forCopying := IfThen(rightClicked_selectedFileOrDir = 0, INVALID_FILE, (currentPath + GetFileFromHandle(rightClicked_selectedFileOrDir).findData.cFileName));
+          CreateShortCut(selectedFileOrDirName_forCopying);
+          PrintLogMsg('Selected file path: ' + selectedFileOrDirName_forCopying);
+
+          goto repaintFiles;
         end;
 
         //Read the context menu's delete button click event
@@ -791,15 +1270,7 @@ begin
           goto repaintFiles;
         end;
 
-
-        //If command is from an event fired from the message box's textbox, grab the textbox's text and update the path
-        if(lParam = hSmallWndEdit) then
-        begin
-          editText := buffer;
-          GetWindowText(hSmallWndEdit, editText, 1024);
-          newFileName_str := editText;
-          goto endOfFunction;
-        end;
+        { --------------------- "App bar" buttons events --------------------- }
 
         //Check for the create file button event
         if(lParam = hCreateFileBtn) then
@@ -827,6 +1298,27 @@ begin
           isSmallWndOpen := true;
         end;
 
+        { --------------------- Text boxs edit events ------------------------ }
+
+        //If command is from an event fired from the search textbox, grab the textbox's text and update the path
+        if(lParam = hEdit) then
+        begin
+          editText := buffer;
+          GetWindowText(hEdit, editText, 1024);
+          UpdatePath(editText);
+          goto endOfFunction;
+        end;
+
+        //If command is from an event fired from the message box's textbox, grab the textbox's text and update the path
+        if(lParam = hSmallWndEdit) then
+        begin
+          editText := buffer;
+          GetWindowText(hSmallWndEdit, editText, 1024);
+          newFileName_str := editText;
+          goto endOfFunction;
+        end;
+
+        { ------------------------ Other events ----------------------------- }
 
         {
           When creating a textbox, the OS fires an event and enters to this
@@ -840,6 +1332,8 @@ begin
         }
         if((not isCommandFromAButton(lParam))) then  //This saves a lot of lifes
           goto endOfFunction;
+
+        { ----------------- Custom Message Box buttons events ---------------- }
 
         //Process the cancel button from the message box
         if(lParam = hSmallCancelBtn) then
@@ -856,7 +1350,9 @@ begin
           goto repaintFiles;
         end;
 
-        //If a button was clicked, lParam will have the handle of the button
+        { ----------------- File's button events ---------------- }
+
+        //If a file button was clicked, lParam will have the handle of the button that was pressed
         fileData := GetFileFromHandle(lParam);
 
         str := fileData.findData.cFileName;
@@ -867,36 +1363,64 @@ begin
         begin
           command := 'Unknown file extension';
 
-          MessageBox(hMainHandle,'Its a file!', 'Hello', MB_OK or MB_ICONINFORMATION);
           pathFromTheFuture := pathFromTheFuture.Remove(pathFromTheFuture.LastIndexOf('\') - 1);  //Get rid of the '\\' from the string
 
-          if(pathFromTheFuture.Contains('.exe')) then
+          if(pathFromTheFuture.EndsWith('.exe')) then
           begin
-            command := 'open';
-            ShellExecute(HInstance, PWideChar(command), PWideChar(pathFromTheFuture), nil, nil, SW_SHOWNORMAL);
+            OK := ExecuteProcess(pathFromTheFuture, '', '', false, false, false, Error);
+            PrintLogMsg('Creating of process status: ' + BoolToStr(OK));
+
+            goto endOfFunction;
+          end;
+
+          if(pathFromTheFuture.EndsWith('.lnk')) then
+          begin
+            Winshell.GetShellLinkInfo(pathFromTheFuture, data);
+            PrintInfoMsg('File path of the shortcut target: ' + data.PathName);
+
             goto endOfFunction;
           end;
 
           { Execute custom commands }
-          if(pathFromTheFuture.Contains('.txt')) then
+          if(pathFromTheFuture.EndsWith('.txt')) then
           begin
-            command := 'code';
+            command    := 'C:\Users\DELL\AppData\Local\Programs\Microsoft VS Code\Code.exe';
+            parameters := pathFromTheFuture;
+          end;
+
+          if(pathFromTheFuture.EndsWith('.png')) then
+          begin
+            command    := 'rundll32.exe';
+            parameters := '"C:\Program Files\Windows Photo Viewer\PhotoViewer.dll", ImageView_Fullscreen ' + pathFromTheFuture;
           end;
 
           if(not (command = 'Unknown file extension')) then
-            begin
-              ShellExecute(HInstance, nil, PWideChar(command), PWideChar(pathFromTheFuture), nil, SW_SHOWNORMAL);
-              writeln(SysErrorMessage(GetLastError));
-            end
+          begin
+            OK := ExecuteProcess(command, parameters, '', false, false, false, Error);
+            PrintLogMsg('Creating of process status: ' + BoolToStr(OK));
+          end
           else
-            begin
-              writeln('unknown file extension ok? Cannot open this file');
-            end;
+          begin
+              PrintErrorMsg('unknown file extension ok? Cannot open this file');
+          end;
 
           goto endOfFunction;
         end;
 
 
+        if(str = '..') then
+        begin
+          //Since pathFromTheFuture will look like this: 'C:\\Users\\..\\', remove the '..' first
+          pathFromTheFuture := pathFromTheFuture.Remove(pathFromTheFuture.IndexOf('..'));
+          //Now, the string will look like this 'C:\\Users\\' but we want to get rid of the 'Users\\' because we want to go back a dir, in this case 'C:\\'
+          //So, get rid of the '\\'
+          pathFromTheFuture := pathFromTheFuture.Remove(pathFromTheFuture.LastIndexOf('\\'));
+          //Now the string looks like this 'C:\\Users', now remove the last index of the '\\' plus 2
+          //because we actually want to keep the '\\' in the path but at the same time we want to get rid of the rest of the chars that are after the '\\'
+          pathFromTheFuture := pathFromTheFuture.Remove(pathFromTheFuture.LastIndexOf('\\') + 2);
+          //Now the strings will look like this: 'C:\\'
+        end;
+          
         UpdatePath(pathFromTheFuture);
 
         nLevel := 0;
@@ -904,7 +1428,7 @@ begin
         repaintFiles:
           DestroyWindow(hEdit); //Destroy the label that shows the current path to display the new path (this will be repainted in DrawElements function)
           DestroyAllFiles();
-          DrawElements(); //Repaint new path directory
+          DrawElements(); //Draw all the files in the new path directory
       end;
 
       WM_DESTROY: begin
@@ -932,11 +1456,13 @@ end;
 
 procedure InitFileExtensionMap();
 begin
-  FileExtensionIconMap.Add('back', hBackIcon);
-  FileExtensionIconMap.Add('folder', hFolderIcon);
-  FileExtensionIconMap.Add('file', hFileIcon);
-  FileExtensionIconMap.Add('txt', hTxtFileIcon);
-  FileExtensionIconMap.Add('exe', hExeFileIcon);
+  FileExtensionIconMap.Add('back'    ,  hBackIcon);
+  FileExtensionIconMap.Add('folder'  ,  hFolderIcon);
+  FileExtensionIconMap.Add('file'    ,  hFileIcon);
+  FileExtensionIconMap.Add('txt'     ,  hTxtFileIcon);
+  FileExtensionIconMap.Add('shortcut',  hShortCutIcon);
+  FileExtensionIconMap.Add('symlink' ,  hSymLinkIcon);
+  FileExtensionIconMap.Add('exe'     ,  hExeFileIcon);
 end;
 
 begin
@@ -947,7 +1473,12 @@ begin
   hPrevLev2Item                  := 0;
   nLevel                         := 0;
   rightClicked_selectedFileOrDir := 0;
-  selectedFileOrDir_forCopying   := INVALID_FILE;
+  selectedFile_Operation             := OPERATION_COPYING;
+  selectedFileOrDirName_forCopying   := INVALID_FILE;
+
+  Randomize();
+  InitCommonControls();
+
 
   with LWndClass do
     begin
@@ -968,6 +1499,7 @@ begin
 
   fontName := 'Comic Sans MS';
 
+
   //Create the fonts to use
   hFontText   := CreateFont(-20,0,0,0,0,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,VARIABLE_PITCH or FF_SWISS, fontName);
   hFontButton := CreateFont(-14,0,0,0,0,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,VARIABLE_PITCH or FF_SWISS, fontName);
@@ -975,7 +1507,10 @@ begin
 
   currentPath  := 'C:\\';
   fileList     := TList<TFileData>.Create;
+  nodeList     := TList<TVNode>.Create;
   pureFileList := TList<WIN32_FIND_DATA>.Create;
+  hack         := TList<Integer>.Create;
+  g_nUniqueID   := 0;
   FileExtensionIconMap := TDictionary<string,HBITMAP>.Create;
   InitFileExtensionMap();
 
@@ -1004,6 +1539,7 @@ begin
   DrawElements();
 
   CreateTreeView();
+  LoadDirectoryIntoTreeViewNodeList('C:', TVI_ROOT);
 
   while GetMessage(Msg,0,0,0) do
   begin
