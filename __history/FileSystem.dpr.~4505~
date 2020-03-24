@@ -17,6 +17,8 @@ uses
   Math,
   WinShell in 'WinShell.pas';
 
+//WinShell in 'WinShell.pas';
+
 type
   TFileData = record
     findData : WIN32_FIND_DATA;
@@ -34,6 +36,10 @@ type
     hItem        : HTREEITEM; // Where to insert
     hParentItem  : HTREEITEM; // Keep Track of where its coming from
   end;
+  TIcon = record
+    hSmall   : HBITMAP;
+    hNormal  : HBITMAP;
+  end;
   TFileList     = TList<TFileData>;
   TFiles        = TList<WIN32_FIND_DATA>;
   THack         = TList<Integer>;
@@ -41,9 +47,13 @@ type
 
 const TV_ICON_SIZE = 20;
 
+const SMALL_SIZE = 30;
+
 const BackFileIconPath       = 'C:/Users/DELL/Documents/Siso2/backIcon_bmp.bmp';
 const FolderIconPath         = 'C:/Users/DELL/Documents/Siso2/Windows_folder_icon_bmp.bmp';
 const FileIconPath           = 'C:/Users/DELL/Documents/Siso2/file_icon2_bmp.bmp';
+const MenuIconPath           = 'C:/Users/DELL/Documents/Siso2/menu_icon_bmp.bmp';
+const PngFileIconPath        = 'C:/Users/DELL/Documents/Siso2/png_icon_bmp.bmp';
 const TextFileIconPath       = 'C:/Users/DELL/Documents/Siso2/txtIcon_bmp.bmp';
 const SearchIconPath         = 'C:/Users/DELL/Documents/Siso2/searchIcon2_bmp.bmp';
 const ShortcutIconPath       = 'C:/Users/DELL/Documents/Siso2/shortcut_icon_bmp.bmp';
@@ -80,7 +90,6 @@ var
   LWndClass         : TWndClass;
   LTWndClass        : TWndClass;
   hMainHandle       : HWND;
-  hButton           : HWND;
   hTreeView         : HWND;
   hStatic           : HWND;
   hEdit             : HWND;
@@ -96,6 +105,7 @@ var
   hPathBtn          : HWND;
   hUpBtn            : HWND;
   hDownBtn          : HWND;
+  hStyleBtn         : HWND;
 
   hack : THack;
 
@@ -103,6 +113,8 @@ var
   isSmallWndOpen    : Boolean;
   isFileBeingCreated: Boolean;
   selectedFile_Operation : Integer;
+
+  isLinear          : Boolean;
 
   hPrev             : HTREEITEM;
   hPrevRootItem     : HTREEITEM;
@@ -112,6 +124,7 @@ var
   g_nClosed         : Integer;
   g_nDocument       : Integer;
   g_nUniqueID       : Integer;
+  g_nForbiddenHandle: HWND;
 
   nLevel            : Integer;
   insertStructAddr  : Integer;
@@ -125,11 +138,15 @@ var
   hSmallWndEdit, hSmallOkBtn, hSmallCancelBtn : HWND;
 
   { Icon Handles }
-  hCreateFileIcon, hCreateFolderIcon, hBackIcon, hShortCutIcon, hSymLinkIcon   : HBITMAP;
-  hFolderIcon, hFileIcon, hTxtFileIcon, hExeFileIcon, hSearchPathIcon          : HBITMAP;
-  hSmallFolderIcon : HBITMAP;
+  hCreateFileIcon, hCreateFolderIcon, hSearchPathIcon, hMenuIcon, hSmallFolderIcon : HBITMAP;
 
-  FileExtensionIconMap : TDictionary<string, HBITMAP>;
+  { Icon Struct  }
+  tBackIcon, tShortCutIcon, tSymLinkIcon     : TIcon;
+  tFolderIcon, tFileIcon, tTxtFileIcon       : TIcon;
+  tExeFileIcon, tPngFileIcon                 : TIcon;
+
+
+  FileExtensionIconMap : TDictionary<string, TIcon>;
   TreeViewNodesMap     : TDictionary<string, TVNode>;
 
 label exity;
@@ -211,6 +228,7 @@ function isPathDirectory(path : string) : Boolean;
 var
   fileHandle  : HWND;
   filePath    : string;
+  recData     : TSearchRec;
 begin
   if(not path.EndsWith('\\')) then
   begin
@@ -227,6 +245,9 @@ begin
     exit;
   end;
 
+  g_nForbiddenHandle := fileHandle;
+  recData.FindHandle := fileHandle;
+  FindClose(recData);
   Result := true;
 
 end;
@@ -269,11 +290,9 @@ end;
 procedure InitTreeViewImageListView();
 var
  himl   : HIMAGELIST;
- hbmp   : HBITMAP;
- status : Integer;
 begin
 
- himl := ImageList_Create(TV_ICON_SIZE , TV_ICON_SIZE , 0, 3, 0);
+ himl := ImageList_Create(TV_ICON_SIZE, TV_ICON_SIZE , 0, 3, 0);
 
  PrintDebugMsg('Got here');
 
@@ -284,7 +303,7 @@ begin
  if (ImageList_GetImageCount(himl) < 3) then
         PrintLogMsg('Init of tree view image list failed miserably');
 
- status      := TreeView_SetImageList(hTreeView, himl, TVSIL_NORMAL);
+ TreeView_SetImageList(hTreeView, himl, TVSIL_NORMAL);
 
 end;
 
@@ -292,7 +311,6 @@ function AddItemToTreeView ( strName : string; uniqueID : Integer; hNodeParent :
 var
   tvi   : tagTVITEMA;
   tvins : tagTVINSERTSTRUCTA;
-  hti   : HTREEITEM;
 begin
 
   tvi.mask := TVIF_TEXT or TVIF_IMAGE or TVIF_SELECTEDIMAGE or TVIF_PARAM;
@@ -311,7 +329,6 @@ begin
   tvins.hInsertAfter := hPrev;
 
   //Choose where to insert the new item
-  //tvins.hParent := HTREEITEM(IfThen(nLevel = 1, Integer(TVI_ROOT), Integer(hNodeParent)));
   tvins.hParent := hNodeParent;
 
   //Add the item to the tree-view control
@@ -324,93 +341,21 @@ begin
    Result := AddItemToTreeView(node.name, node.ID, node.hParentItem);
 end;
 
-function  AddItemToTree( strName : string; nLevel : Integer; random : Integer ) : HTREEITEM;
+function IsDirectoryLoadedIntoTreeViewAlready(path : string) : Boolean;
 var
-  tvi   : tagTVITEMA;
-  tvins : tagTVINSERTSTRUCTA;
-  hti   : HTREEITEM;
+  node : TVNode;
 begin
 
-  tvi.mask := TVIF_TEXT or TVIF_IMAGE or TVIF_SELECTEDIMAGE or TVIF_PARAM;
-
-  //Set text of the item
-  tvi.pszText    := PAnsiChar(PWideChar(strname));
-  tvi.cchTextMax := strName.Length;
-
-  //Assume the item is not a parent item, so give it a document image
-  tvi.iImage := g_nDocument;
-  tvi.iSelectedImage := g_nDocument;
-
-  //Save the heading level in the item's application-defined data area
-  tvi.lParam := LParam(nLevel);
-  tvins.item := tvi;
-  tvins.hInsertAfter := hPrev;
-  tvins.item.lParam  := random;
-
-  //Set the parent item based on the specified level
-   if(nLevel = 1) then
-    begin
-      tvins.hParent := TVI_ROOT;
-    end
-   else if(nLevel = 2) then
-    begin
-      tvins.hParent := hPrevRootItem;
-    end
-   else
-    tvins.hParent := hPrevLev2Item;
-
-
-   //Add the item to the tree-view control
-   hPrev := HTREEITEM(SendMessage(hTreeView, TVM_INSERTITEM, 0, lParam(@tvins)));
-
-   Result := HTREEITEM(SendMessage(hTreeView, TVM_INSERTITEM, 0, lParam(@tvins)));
-
-   //exit;
-
-   if(hPrev = nil) then
-   begin
-    Result := nil;
-    exit;
-   end;
-
-   if(nLevel = 1) then
-     begin
-      hPrevRootItem := hPrev;
-     end
-   else if(nLevel = 2) then
-     begin
-       hPrevLev2Item := hPrev;
-     end;
-
-
-   if(nLevel > 1) then
-   begin
-    hti := TreeView_GetParent(hTreeView, hPrev);
-    tvi.mask := TVIF_IMAGE or TVIF_SELECTEDIMAGE;
-    tvi.hItem := hti;
-    tvi.iImage := g_nClosed;
-    tvi.iSelectedImage := random;
-    TreeView_SetItemA(hTreeView, tvi);
-   end;
-
-   Result := hPrev;
-end;
-
-procedure InitTreeViewItems();
-var
-  hti : HTREEITEM;
-  i   : Integer;
-begin
-
-  //AddItemToTreeView('Hola' , 1, 444);
-
-  for i := 0 to 5 do
+  for node in nodeList do
   begin
-    //AddItemToTreeView('Hola' + IntToStr(i), i + 2, i);
+    if(node.fullPath = path) then
+    begin
+      Result := true;
+      exit;
+    end;
   end;
 
-  //AddItemToTreeView('Su gfa', 8, 211);
-
+  Result := false;
 end;
 
 procedure LoadDirectoryIntoTreeViewNodeList(path : string; hNodeParent : HTREEITEM);
@@ -424,10 +369,18 @@ begin
 
   fileHandle := FindFirstFile(PWideChar(path + '*'), fileData);
 
+
   repeat
 
     if((string(fileData.cFileName) = '.') or (string(fileData.cFileName) = '..')) then
       continue;
+
+    //Avoid duplication on a tree view node
+    if(IsDirectoryLoadedIntoTreeViewAlready(path + fileData.cFileName)) then
+    begin
+      PrintInfoMsg('Directory already exists in the treeview! Skipping the addition to the treeview');
+      exit;
+    end;
 
     if(isPathDirectory(path + fileData.cFileName + '\\')) then
     begin
@@ -450,7 +403,7 @@ procedure CreateTreeView();
 begin
   InitCommonControls();
 
-  hTreeView := CreateWindowEx(0, WC_TREEVIEW, LTWndClass.lpszClassName, WS_VISIBLE or WS_CHILD or TVS_HASLINES or TVS_HASBUTTONS, 10, TOP_BODY_Y, 180, 550, hMainHandle, 0, hInstance, 0);
+  hTreeView := CreateWindowEx(0, WC_TREEVIEW, LTWndClass.lpszClassName, WS_VISIBLE or WS_BORDER or TVS_HASBUTTONS or TVS_LINESATROOT, 10, TOP_BODY_Y, 180, 550, hMainHandle, 0, hInstance, nil);
 
   InitTreeViewImageListView();
 end;
@@ -495,9 +448,9 @@ begin
   currentPath := newPath;
 end;
 
-function GetIconFromFileExtension(fileName : string) : HBITMAP;
+function GetIconFromFileExtension(fileName : string) : TIcon;
 var
-  icon     : HBITMAP;
+  icon     : TIcon;
   fullPath : string;
   fileAttr : DWORD;
 begin
@@ -533,6 +486,10 @@ begin
       else if(fileName.EndsWith('.lnk')) then
         begin
           FileExtensionIconMap.TryGetValue('shortcut', icon);
+        end
+      else if(fileName.EndsWith('.png')) then
+        begin
+          FileExtensionIconMap.TryGetValue('png', icon);
         end
       else
         begin
@@ -576,7 +533,7 @@ begin
   xPos :=  TOP_BODY_X + (iteratorX * 150);
   yPos :=  TOP_BODY_Y + (iteratorY * (btnHeight div 2) * 3);
 
-  hFileIcon := GetIconFromFileExtension(data.cFileName);
+  hFileIcon := GetIconFromFileExtension(data.cFileName).hNormal;
 
   //Create the button with a background image (the image being the icon depending on the file's type)
   handles.mainHandle := CreateWindowW('Button', data.cFileName, WS_VISIBLE or WS_CHILD or BS_BITMAP, xPos, yPos, btnWidth, btnHeight, hMainHandle, 0, hInstance, nil);
@@ -584,6 +541,37 @@ begin
 
   //Create the label which contains the file's name
   handles.hLabel := CreateWindowEx(2,'Edit', data.cFileName, WS_VISIBLE or WS_CHILD or ES_LEFT, xPos, yPos + btnHeight + 10, labelWidth, 20,hMainHandle,0,hInstance,nil);
+  SendMessage(handles.hLabel,WM_SETFONT,hFontFiles,0);
+
+  Result := handles; //Returns the newly created handle (in this case, a button handle)
+end;
+
+function DrawSmallFile(iteratorX : Integer; iteratorY : Integer; data : WIN32_FIND_DATA) : THandles;
+var
+  btnWidth  : Integer;
+  btnHeight : Integer;
+  handles   : THandles;
+  xPos      : Integer;
+  yPos      : Integer;
+  labelWidth: Integer;
+  hFileIcon : HBITMAP;
+begin
+  btnWidth  := SMALL_SIZE;
+  btnHeight := SMALL_SIZE;
+
+  labelWidth := string(data.cFileName).Length * 2 + 100; //Label's width will be according to the file's name size
+
+  xPos :=  TOP_BODY_X + (iteratorX * 200);
+  yPos :=  TOP_BODY_Y + (iteratorY * (btnHeight div 2) * 3);
+
+  hFileIcon := GetIconFromFileExtension(data.cFileName).hSmall;
+
+  //Create the button with a background image (the image being the icon depending on the file's type)
+  handles.mainHandle := CreateWindowW('Button', data.cFileName, WS_VISIBLE or WS_CHILD or BS_BITMAP, xPos, yPos, btnWidth, btnHeight, hMainHandle, 0, hInstance, nil);
+  SendMessageW(handles.mainHandle,BM_SETIMAGE,IMAGE_BITMAP, LPARAM(hFileIcon));
+
+  //Create the label which contains the file's name
+  handles.hLabel := CreateWindowEx(2,'Edit', data.cFileName, WS_VISIBLE or WS_CHILD or ES_LEFT, xPos + btnWidth + 2, yPos, labelWidth, 20,hMainHandle,0,hInstance,nil);
   SendMessage(handles.hLabel,WM_SETFONT,hFontFiles,0);
 
   Result := handles; //Returns the newly created handle (in this case, a button handle)
@@ -621,11 +609,10 @@ begin
 
 end;
 
-procedure DrawDirectory();
+procedure DrawDirectoryScatter();
 var
   iteratorX     : Integer;
   iteratorY     : Integer;
-  fileHandle    : HWND;
   handles       : THandles;
   startingIndex : Integer;
   data          : TFileData;
@@ -670,6 +657,54 @@ begin
 
 end;
 
+procedure DrawDirectoryLinear();
+
+const FILES_PER_COLUMN = 12;
+var
+  iteratorX     : Integer;
+  iteratorY     : Integer;
+  handles       : THandles;
+  data          : TFileData;
+  startingIndex : Integer;
+  i             : Integer;
+begin
+
+  iteratorX := 0;
+  iteratorY := 0;
+
+  if(not isPathDirectory(currentPath + '*')) then
+  begin
+    exit;
+  end;
+
+  LoadDirectoryIntoList(); //Reads the current directory path and adds them into the pureFileList array
+
+  startingIndex := nLevel * FILES_PER_COLUMN;
+
+  for i := startingIndex to pureFileList.Count do
+    begin
+
+      if(i = pureFileList.Count) then
+        exit;
+
+      data.findData := pureFileList[i];
+
+      handles := DrawSmallFile(iteratorX, iteratorY, data.findData);
+      AddFileToList(data.findData, handles);
+
+      //Increment this variable that will be used to make space between all subsequent buttons that will be created
+      iteratorY := iteratorY + 1;
+
+      if ((iteratorY mod FILES_PER_COLUMN = 0)) then
+      begin
+        iteratorX := iteratorX + 1;
+        iteratorY := 0;
+      end;
+
+    end;
+
+end;
+
 procedure DrawElements();
 var
   pathStr : string;
@@ -681,7 +716,14 @@ begin
   hEdit := CreateWindowEx(2, 'Edit', PWideChar(pathStr), WS_VISIBLE or WS_CHILD or ES_LEFT or ES_AUTOHSCROLL or WS_BORDER, SEARCH_BAR_X_POS, SEARCH_BAR_Y_POS, 1100, 33,hMainHandle,0,hInstance,nil);
   SendMessage(hEdit,WM_SETFONT,hFontText,0);
 
-  DrawDirectory();
+  if(isLinear) then
+    begin
+      DrawDirectoryLinear();
+    end
+  else
+    begin
+      DrawDirectoryScatter();
+    end;
 end;
 
 function isCommandFromAButton(lParam: LPARAM) :  Boolean;
@@ -910,7 +952,6 @@ end;
 
 procedure DeepDeletionOfFiles(root : string);
 var
-  fileHandle  : HWND;
   fileData    : TSearchRec;
   sourceFile  : string;
 begin
@@ -921,7 +962,9 @@ begin
   repeat
     //Avoid a infinite loop by ignoring this file names
     if((string(fileData.Name) = '.') or (string(fileData.Name) = '..')) then
+    begin
       continue;
+    end;
 
     sourceFile := root + '\\' + fileData.Name;
 
@@ -975,9 +1018,6 @@ procedure CopyPasteSelectedFileOrDirectory();
  var
   origin              : string;
   destination         : string;
-  Info                : TSHFileOpStruct;
-  fileOperationStatus : Integer;
-  i: Integer;
 begin
   if(selectedFileOrDirName_forCopying = INVALID_FILE) then
     exit;
@@ -1006,7 +1046,6 @@ procedure CutPasteSelectedFileOrDirectory();
 var
   origin              : string;
   destination         : string;
-  Info                : TSHFileOpStruct;
   fileOperationStatus : Boolean;
   buffer              : array[0..1023] of char;
   buffer2             : array[0..1023] of char;
@@ -1048,6 +1087,7 @@ procedure DeleteSelectedFileOrDirectory();
 var
   filePath            : string;
   fileData            : TFileData;
+  fileStruct          : TSearchRec;
 begin
 
   //Get file's data from the global variable selectedFileOrDir
@@ -1067,44 +1107,24 @@ begin
 
 end;
 
-procedure CheckRepeated(lParam : Integer);
-var
-  element : Integer;
-  isFound : Boolean;
-begin
-
-  isFound := hack.Contains(lParam);
-
-  if(isFound) then
-    exit;
-
-  PrintLogMsg('Not repeated, is unique: ' +  IntToStr(lParam));
-  hack.Add(lParam);
-end;
-
 function WindowProc(hWnd, Msg:Longint; wParam : WPARAM; lParam: LPARAM):Longint; stdcall;
 var
   fileData              : TFileData;
   str                   : string;
   editText              : PWideChar;
   buffer                : array[0..1023] of char;
-  secondBuffer          : array[0..1023] of WideChar;
   pathFromTheFuture     : string;
   command               : string;
   parameters            : string;
   hPopUpMenu            : HMENU;
   cursorPoint           : TPoint;
   fileHandleExist       : Boolean;
-  FileName              : string;
-  WorkingFolder         : string;
   Error                 : integer;
   OK                    : boolean;
   tvData                : PNMHDR;
   ptvkd                 : PNMKey;
-  pSelectedItem         : TTVItem;
   selectedTVNode        : TVNode;
   hTreeSelectedItem     : HTREEITEM;
-  tvItemString          : string;
   contextMenuPasteBtnFlags : Integer;
   data                     : TShellLinkInfo;
 label endOfFunction, destroySmallWnd, repaintFiles;
@@ -1113,18 +1133,33 @@ begin
   case Msg of
       WM_CREATE: begin
 
-        //Load all the icons
-        hBackIcon         := HBITMAP(LoadImageW(0, PWideChar(BackFileIconPath),       IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
-        hFolderIcon       := HBITMAP(LoadImageW(0, PWideChar(FolderIconPath),         IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
-        hSmallFolderIcon  := HBITMAP(LoadImageW(0, PWideChar(FolderIconPath),         IMAGE_BITMAP, TV_ICON_SIZE, TV_ICON_SIZE, LR_LOADFROMFILE));
-        hFileIcon         := HBITMAP(LoadImageW(0, PWideChar(FileIconPath),           IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
-        hTxtFileIcon      := HBITMAP(LoadImageW(0, PWideChar(TextFileIconPath),       IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
-        hExeFileIcon      := HBITMAP(LoadImageW(0, PWideChar(ExecutableFileIconPath), IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        //Load all the icons with its normal size
+        tBackIcon.hNormal         := HBITMAP(LoadImageW(0, PWideChar(BackFileIconPath),       IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        tFolderIcon.hNormal       := HBITMAP(LoadImageW(0, PWideChar(FolderIconPath),         IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        tFileIcon.hNormal         := HBITMAP(LoadImageW(0, PWideChar(FileIconPath),           IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        tPngFileIcon.hNormal      := HBITMAP(LoadImageW(0, PWideChar(PngFileIconPath),        IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        tTxtFileIcon.hNormal      := HBITMAP(LoadImageW(0, PWideChar(TextFileIconPath),       IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        tExeFileIcon.hNormal      := HBITMAP(LoadImageW(0, PWideChar(ExecutableFileIconPath), IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        tShortCutIcon.hNormal     := HBITMAP(LoadImageW(0, PWideChar(ShortcutIconPath),       IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+        tSymLinkIcon.hNormal      := HBITMAP(LoadImageW(0, PWideChar(SymLinkIconPath),        IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
+
+        //Load all the icons with its normal size
+        tBackIcon.hSmall         := HBITMAP(LoadImageW(0, PWideChar(BackFileIconPath),       IMAGE_BITMAP, SMALL_SIZE, SMALL_SIZE, LR_LOADFROMFILE));
+        tFolderIcon.hSmall       := HBITMAP(LoadImageW(0, PWideChar(FolderIconPath),         IMAGE_BITMAP, SMALL_SIZE, SMALL_SIZE, LR_LOADFROMFILE));
+        tFileIcon.hSmall         := HBITMAP(LoadImageW(0, PWideChar(FileIconPath),           IMAGE_BITMAP, SMALL_SIZE, SMALL_SIZE, LR_LOADFROMFILE));
+        tPngFileIcon.hSmall      := HBITMAP(LoadImageW(0, PWideChar(PngFileIconPath),        IMAGE_BITMAP, SMALL_SIZE, SMALL_SIZE, LR_LOADFROMFILE));
+        tTxtFileIcon.hSmall      := HBITMAP(LoadImageW(0, PWideChar(TextFileIconPath),       IMAGE_BITMAP, SMALL_SIZE, SMALL_SIZE, LR_LOADFROMFILE));
+        tExeFileIcon.hSmall      := HBITMAP(LoadImageW(0, PWideChar(ExecutableFileIconPath), IMAGE_BITMAP, SMALL_SIZE, SMALL_SIZE, LR_LOADFROMFILE));
+        tShortCutIcon.hSmall     := HBITMAP(LoadImageW(0, PWideChar(ShortcutIconPath),       IMAGE_BITMAP, SMALL_SIZE, SMALL_SIZE, LR_LOADFROMFILE));
+        tSymLinkIcon.hSmall      := HBITMAP(LoadImageW(0, PWideChar(SymLinkIconPath),        IMAGE_BITMAP, SMALL_SIZE, SMALL_SIZE, LR_LOADFROMFILE));
+
+
+        //Load all the other icons that dont need its small size
         hSearchPathIcon   := HBITMAP(LoadImageW(0, PWideChar(SearchIconPath),         IMAGE_BITMAP,100, 80, LR_LOADFROMFILE));
-        hShortCutIcon     := HBITMAP(LoadImageW(0, PWideChar(ShortcutIconPath),       IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
-        hSymLinkIcon      := HBITMAP(LoadImageW(0, PWideChar(SymLinkIconPath),        IMAGE_BITMAP, 80, 80, LR_LOADFROMFILE));
         hCreateFileIcon   := HBITMAP(LoadImageW(0, PWideChar(CreateFileIconPath),     IMAGE_BITMAP, 80, 78, LR_LOADFROMFILE));
+        hMenuIcon         := HBITMAP(LoadImageW(0, PWideChar(MenuIconPath),           IMAGE_BITMAP, 45, 45, LR_LOADFROMFILE));
         hCreateFolderIcon := HBITMAP(LoadImageW(0, PWideChar(CreateFolderIconPath),   IMAGE_BITMAP, 50, 50, LR_LOADFROMFILE));
+        hSmallFolderIcon  := HBITMAP(LoadImageW(0, PWideChar(FolderIconPath),         IMAGE_BITMAP, 20, 20, LR_LOADFROMFILE));
       end;
 
       WM_NOTIFY: begin
@@ -1215,7 +1250,7 @@ begin
           end
         else
           begin
-            //Save the handle that the user right-clicked on, in order to use that handle to find and delete the file or for other file operations
+            { Save the handle that the user right-clicked on, in order to use that handle to find and delete the file or for other file operations }
             rightClicked_selectedFileOrDir := wParam;
 
             InsertMenu(hPopupMenu, 0, MF_BYPOSITION or MF_STRING, DELETE_FILE_CONTEXT_MENU_BTN_ID, PWideChar('Delete'));
@@ -1371,6 +1406,19 @@ begin
           isSmallWndOpen := true;
         end;
 
+        //Check for the menu icon button event
+        if(lParam = hStyleBtn) then
+        begin
+
+          //If the message box window is open, dont proceed
+          if(isSmallWndOpen) then
+            goto endOfFunction;
+
+          isLinear := not isLinear;
+
+          goto repaintFiles;
+        end;
+
         { --------------------- Text boxs edit events ------------------------ }
 
         //If command is from an event fired from the search textbox, grab the textbox's text and update the path
@@ -1463,8 +1511,10 @@ begin
 
           if(pathFromTheFuture.EndsWith('.png')) then
           begin
-            command    := 'rundll32.exe';
-            parameters := '"C:\Program Files\Windows Photo Viewer\PhotoViewer.dll", ImageView_Fullscreen ' + pathFromTheFuture;
+            //command    := 'C:\\Windows\\System32\\rundll32.exe';
+            //parameters := '"C:\\Program Files (x86)\\Windows Photo Viewer\\PhotoViewer.dll", ImageView_Fullscreen ' + pathFromTheFuture;
+            command    := 'C:\Users\DELL\AppData\Local\Programs\Microsoft VS Code\Code.exe';
+            parameters := pathFromTheFuture;
           end;
 
           if(not (command = 'Unknown file extension')) then
@@ -1529,13 +1579,14 @@ end;
 
 procedure InitFileExtensionMap();
 begin
-  FileExtensionIconMap.Add('back'    ,  hBackIcon);
-  FileExtensionIconMap.Add('folder'  ,  hFolderIcon);
-  FileExtensionIconMap.Add('file'    ,  hFileIcon);
-  FileExtensionIconMap.Add('txt'     ,  hTxtFileIcon);
-  FileExtensionIconMap.Add('shortcut',  hShortCutIcon);
-  FileExtensionIconMap.Add('symlink' ,  hSymLinkIcon);
-  FileExtensionIconMap.Add('exe'     ,  hExeFileIcon);
+  FileExtensionIconMap.Add('back'    ,  tBackIcon);
+  FileExtensionIconMap.Add('folder'  ,  tFolderIcon);
+  FileExtensionIconMap.Add('file'    ,  tFileIcon);
+  FileExtensionIconMap.Add('txt'     ,  tTxtFileIcon);
+  FileExtensionIconMap.Add('png'     ,  tPngFileIcon);
+  FileExtensionIconMap.Add('shortcut',  tShortCutIcon);
+  FileExtensionIconMap.Add('symlink' ,  tSymLinkIcon);
+  FileExtensionIconMap.Add('exe'     ,  tExeFileIcon);
 end;
 
 begin
@@ -1546,6 +1597,7 @@ begin
   hPrevLev2Item                  := 0;
   nLevel                         := 0;
   rightClicked_selectedFileOrDir := 0;
+  isLinear                       := False;
   selectedFile_Operation             := OPERATION_COPYING;
   selectedFileOrDirName_forCopying   := INVALID_FILE;
 
@@ -1584,7 +1636,7 @@ begin
   pureFileList := TList<WIN32_FIND_DATA>.Create;
   hack         := TList<Integer>.Create;
   g_nUniqueID   := 0;
-  FileExtensionIconMap := TDictionary<string,HBITMAP>.Create;
+  FileExtensionIconMap := TDictionary<string,TIcon>.Create;
   InitFileExtensionMap();
 
   //Label
@@ -1600,8 +1652,12 @@ begin
   SendMessageW(hCreateFileBtn, BM_SETIMAGE, IMAGE_BITMAP, LPARAM(hCreateFileIcon));
 
   //Create directory btn
-  hCreateDirBtn  := CreateWindowW('Button', 'Create Dir', WS_VISIBLE or WS_CHILD or BS_BITMAP, 290, 75, 50, 50, hMainHandle, 0, hInstance, nil);
+  hCreateDirBtn   := CreateWindowW('Button', 'Create Dir', WS_VISIBLE or WS_CHILD or BS_BITMAP, 290, 75, 50, 50, hMainHandle, 0, hInstance, nil);
   SendMessageW(hCreateDirBtn, BM_SETIMAGE, IMAGE_BITMAP, LPARAM(hCreateFolderIcon));
+
+  //Change menu file btn
+  hStyleBtn       := CreateWindowW('Button', 'Menu Icon', WS_VISIBLE or WS_CHILD or BS_BITMAP, 400, 75, 50, 50, hMainHandle, 0, hInstance, nil);
+  SendMessageW(hStyleBtn, BM_SETIMAGE, IMAGE_BITMAP, LPARAM(hMenuIcon));
 
   //Up Button
   hUpBtn    := CreateWindow('Button', '^', WS_VISIBLE or WS_CHILD or BS_PUSHBUTTON or BS_TEXT, 1250, 300, 40, 40, hMainHandle, 0, hInstance, nil);
